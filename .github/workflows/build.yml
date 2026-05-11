@@ -63,6 +63,7 @@ jobs:
         with:
           python-version: "3.13"
           architecture: ${{ matrix.arch == 'x86_64' && 'x64' || matrix.arch }}
+          cache: pip
 
       - name: Install dependencies
         run: |
