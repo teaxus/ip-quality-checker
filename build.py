@@ -163,6 +163,7 @@ def remote_build(target_platform: str, out_dir: Path) -> None:
     print(f"[remote] Triggering {WORKFLOW} on GitHub (platform={target_platform}) ...")
     _gh("workflow", "run", WORKFLOW,
         "--repo", REPO,
+        "--ref", "main",
         "-f", f"platform={target_platform}")
 
     # Give GitHub a moment to register the new run
