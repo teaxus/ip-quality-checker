@@ -12,6 +12,15 @@ Usage
     python build.py --cli                 # also build the CLI binary
     python build.py --out-suffix=arm64    # rename output (dist/IPQualityChecker-arm64.app)
 
+Remote build (via GitHub Actions)
+----------------------------------
+    python build.py --remote                      # build all 4 targets on CI
+    python build.py --remote --platform windows   # only Windows targets
+    python build.py --remote --platform macos     # only macOS targets
+
+    Requires: gh CLI installed and authenticated (`gh auth login`).
+    Artifacts are downloaded and extracted into dist/ automatically.
+
 About cross-compilation
 -----------------------
 PyInstaller does NOT support cross-OS compilation. To produce all four
@@ -31,15 +40,21 @@ Defaults
 from __future__ import annotations
 
 import argparse
+import json
 import platform
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 APP_NAME = "IPQualityChecker"
 CLI_NAME = "ipqc"
+REPO = "teaxus/ip-quality-checker"
+WORKFLOW = "build.yml"
 
 
 def _separator() -> str:
@@ -116,8 +131,106 @@ def build_cli(onedir: bool, target_arch: str | None,
     subprocess.check_call(cmd, cwd=ROOT)
 
 
+# ── Remote build helpers ──────────────────────────────────────────────────
+
+def _gh(*args: str, capture: bool = False) -> "subprocess.CompletedProcess[str]":
+    """Run a gh CLI command, raising on non-zero exit."""
+    cmd = ["gh"] + list(args)
+    if capture:
+        return subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return subprocess.run(cmd, check=True)
+
+
+def remote_build(target_platform: str) -> None:
+    """Trigger GitHub Actions, wait for completion, extract artifacts to dist/."""
+    dist = ROOT / "dist"
+    dist.mkdir(exist_ok=True)
+
+    # ── Trigger workflow ──────────────────────────────────────────────────
+    print(f"[remote] Triggering {WORKFLOW} on GitHub (platform={target_platform}) ...")
+    _gh("workflow", "run", WORKFLOW,
+        "--repo", REPO,
+        "-f", f"platform={target_platform}")
+
+    # Give GitHub a moment to register the new run
+    time.sleep(5)
+
+    # ── Get the latest run ID ─────────────────────────────────────────────
+    result = _gh("run", "list",
+                 "--repo", REPO,
+                 "--workflow", WORKFLOW,
+                 "--limit", "1",
+                 "--json", "databaseId,status,event",
+                 capture=True)
+    runs = json.loads(result.stdout)
+    if not runs:
+        sys.exit("[remote] ERROR: no run found after triggering workflow")
+    run_id = str(runs[0]["databaseId"])
+    print(f"[remote] Run ID: {run_id}  https://github.com/{REPO}/actions/runs/{run_id}")
+
+    # ── Poll until all jobs finish ────────────────────────────────────────
+    label_filter = target_platform  # 'windows' / 'macos' / 'all'
+    print("[remote] Waiting for build to complete (polling every 15s) ...")
+    for attempt in range(120):  # up to 30 minutes
+        r = _gh("run", "view", run_id,
+                "--repo", REPO,
+                "--json", "status,conclusion,jobs",
+                capture=True)
+        data = json.loads(r.stdout)
+        jobs = data["jobs"]
+
+        if label_filter != "all":
+            jobs = [j for j in jobs if j["name"].startswith(label_filter)]
+
+        pending = [j for j in jobs if j["status"] != "completed"]
+        failed  = [j for j in jobs if j["conclusion"] == "failure"]
+
+        status_line = ", ".join(
+            f"{j['name']}:{j['status']}({j['conclusion'] or '...'})" for j in jobs
+        )
+        print(f"  [{attempt * 15:>4}s] {status_line}")
+
+        if failed:
+            sys.exit(f"[remote] ERROR: jobs failed — {[j['name'] for j in failed]}")
+        if not pending:
+            print("[remote] All target jobs completed successfully.")
+            break
+        time.sleep(15)
+    else:
+        sys.exit("[remote] Timed out waiting for workflow to finish.")
+
+    # ── Download + extract artifacts ──────────────────────────────────────
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        print(f"[remote] Downloading artifacts to {dist} ...")
+        _gh("run", "download", run_id,
+            "--repo", REPO,
+            "-D", str(tmp_path))
+
+        for artifact_dir in tmp_path.iterdir():
+            if not artifact_dir.is_dir():
+                continue
+            # Filter by platform if needed
+            if label_filter != "all" and not artifact_dir.name.lower().startswith(
+                    "ipqualitychecker-" + label_filter):
+                continue
+            for zip_file in artifact_dir.glob("*.zip"):
+                print(f"  Extracting {zip_file.name} -> dist/")
+                with zipfile.ZipFile(zip_file) as zf:
+                    zf.extractall(dist)
+
+    print(f"\n[OK] Remote build complete. Output in {dist}")
+    for item in sorted(dist.iterdir()):
+        print(f"  {item.name}")
+
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--remote", action="store_true",
+                        help="build on GitHub Actions and download artifacts to dist/")
+    parser.add_argument("--platform", choices=("windows", "macos", "all"),
+                        default="all",
+                        help="remote build only: which platform to target (default: all)")
     parser.add_argument("--onedir", action="store_true",
                         help="folder layout (default on macOS — fast launch)")
     parser.add_argument("--onefile", action="store_true",
@@ -135,6 +248,11 @@ def main():
     parser.add_argument("--cli-only", action="store_true",
                         help="only build CLI, skip GUI")
     args = parser.parse_args()
+
+    # ── Remote build path ──
+    if args.remote:
+        remote_build(args.platform)
+        return
 
     # ── Smart default ──
     if not args.onedir and not args.onefile:

@@ -21,11 +21,23 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build (all / windows / macos)'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, windows, macos]
 
 jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.runner }}
+    if: |
+      inputs.platform == null ||
+      inputs.platform == 'all' ||
+      (inputs.platform == 'windows' && startsWith(matrix.label, 'windows')) ||
+      (inputs.platform == 'macos'   && startsWith(matrix.label, 'macos'))
     strategy:
       fail-fast: false
       matrix:
