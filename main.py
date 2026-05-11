@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import traceback
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ import customtkinter as ctk
 import checkers
 from config import load_config, save_config
 import system_actions
+import logger
 
 
 # ── Resource path resolver — works both in dev and when packaged ──────────
@@ -1118,6 +1120,71 @@ class SettingsWindow(ctk.CTkToplevel):
                      font=ctk.CTkFont(size=10)).grid(
             row=5, column=0, padx=8, pady=(0, 10), sticky="w")
 
+        # ── 日志管理 ──
+        ctk.CTkLabel(body, text="日志管理",
+                     text_color=PALETTE["accent"],
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(
+            anchor="w", padx=16, pady=(12, 4))
+        log_frame = ctk.CTkFrame(body, fg_color=PALETTE["panel"],
+                                 border_color=PALETTE["border"],
+                                 border_width=1)
+        log_frame.pack(fill="x", padx=16, pady=8)
+        log_frame.grid_columnconfigure(0, weight=1)
+        
+        log_info = ctk.CTkLabel(
+            log_frame,
+            text=(f"日志保存位置：{logger.LOG_DIR}\n"
+                  f"当日日志：{logger.LOG_FILE.name}\n"
+                  f"所有低于 40 分的事件都会被记录到文件中"),
+            text_color=PALETTE["text"], justify="left",
+            font=ctk.CTkFont(size=10))
+        log_info.grid(row=0, column=0, padx=8, pady=(8, 6), sticky="w")
+        
+        log_btn_frame = ctk.CTkFrame(log_frame, fg_color="transparent")
+        log_btn_frame.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="w")
+        
+        ctk.CTkButton(
+            log_btn_frame, text="打开日志文件夹",
+            fg_color=PALETTE["panel_hi"],
+            hover_color=PALETTE["border"],
+            width=140, height=32,
+            command=lambda: self._open_log_dir()).pack(side="left", padx=4)
+        
+        ctk.CTkButton(
+            log_btn_frame, text="打开今日日志",
+            fg_color=PALETTE["panel_hi"],
+            hover_color=PALETTE["border"],
+            width=140, height=32,
+            command=lambda: self._open_current_log()).pack(side="left", padx=4)
+    
+    def _open_log_dir(self):
+        """Open log directory in file manager."""
+        try:
+            if platform.system() == "Darwin":
+                subprocess.run(["open", str(logger.LOG_DIR)])
+            elif platform.system() == "Windows":
+                subprocess.run(["explorer", str(logger.LOG_DIR)])
+            else:
+                subprocess.run(["xdg-open", str(logger.LOG_DIR)])
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开日志文件夹：{e}")
+    
+    def _open_current_log(self):
+        """Open current log file in default editor."""
+        try:
+            log_file = logger.get_log_file_path()
+            if not log_file.exists():
+                messagebox.showinfo("提示", "今天还没有生成日志")
+                return
+            if platform.system() == "Darwin":
+                subprocess.run(["open", "-t", str(log_file)])
+            elif platform.system() == "Windows":
+                subprocess.run(["notepad", str(log_file)])
+            else:
+                subprocess.run(["xdg-open", str(log_file)])
+        except Exception as e:
+            messagebox.showerror("错误", f"无法打开日志文件：{e}")
+
     def _save(self):
         cfg = self.cfg
         cfg.setdefault("api_keys", {})
@@ -1649,6 +1716,18 @@ class App(ctk.CTk):
             text_color=PALETTE["text"],
             font=ctk.CTkFont(family="Menlo", size=11))
         self.log.pack(fill="both", expand=True, padx=8, pady=8)
+        
+        # Set up persistent file logging
+        def log_callback(line: str):
+            try:
+                self.log.insert("end", f"{line}\n")
+                self.log.see("end")
+            except Exception:
+                pass
+        
+        logger.set_logger_callback(log_callback)
+        logger.log(f"=== IP Quality Checker 启动 {datetime.now():%Y-%m-%d %H:%M:%S} ===")
+
 
     def _ensure_card(self, key: str, title: str) -> ResultCard:
         if key.startswith("latency_") or key == "latency_all":
@@ -2248,9 +2327,8 @@ class App(ctk.CTk):
                 text_color=PALETTE["ok"])
 
     def _log(self, line: str):
-        ts = datetime.now().strftime("%H:%M:%S")
-        self.log.insert("end", f"[{ts}] {line}\n")
-        self.log.see("end")
+        """Log to both file (via logger) and UI."""
+        logger.log(line)
 
     def _log_clear(self):
         self.log.delete("1.0", "end")
@@ -2334,5 +2412,29 @@ if __name__ == "__main__":
     # Toplevel(self), so customtkinter / Tk see exactly one interpreter
     # context. Creating two tk.Tk() instances on macOS causes the second
     # one's event pumping to stall — that's the "页面卡死" symptom we hit.
-    app = App()
-    app.mainloop()
+    try:
+        logger.log("=" * 60)
+        logger.log("IP Quality Checker 启动")
+        logger.log(f"平台: {platform.system()} · Python: {platform.python_version()}")
+        app = App()
+        app.mainloop()
+    except Exception as e:
+        # Capture any exception (especially on Windows where console disappears)
+        error_msg = f"致命错误：{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+        logger.log(f"FATAL ERROR: {error_msg}")
+        
+        # On Windows: show error in a GUI dialog since console is hidden
+        # On macOS/Linux: also show dialog for consistency
+        try:
+            error_root = tk.Tk()
+            error_root.withdraw()  # Hide the root
+            messagebox.showerror(
+                "IPQualityChecker 错误",
+                f"程序启动失败：\n\n{error_msg[:500]}\n\n"
+                f"请检查日志文件：{logger.get_log_file_path()}")
+            error_root.destroy()
+        except Exception:
+            # If even the error dialog fails, just print to stderr
+            print(error_msg, file=sys.stderr)
+        
+        sys.exit(1)

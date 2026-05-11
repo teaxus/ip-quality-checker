@@ -61,6 +61,16 @@ def _separator() -> str:
     return ";" if platform.system() == "Windows" else ":"
 
 
+def _display_path(path: Path) -> str:
+    """Render path relative to project root when possible."""
+    root_resolved = ROOT.resolve()
+    p = path.resolve()
+    try:
+        return str(p.relative_to(root_resolved))
+    except ValueError:
+        return str(p)
+
+
 def _common_args(onedir: bool, target_arch: str | None) -> list[str]:
     """Common PyInstaller flags shared by both GUI and CLI builds."""
     args = [
@@ -105,10 +115,12 @@ def _icon_data_arg() -> list[str]:
 
 
 def build_gui(onedir: bool, target_arch: str | None,
-              out_suffix: str | None) -> None:
+              out_suffix: str | None,
+              out_dir: Path) -> None:
     name = APP_NAME + (f"-{out_suffix}" if out_suffix else "")
     cmd = [sys.executable, "-m", "PyInstaller",
            "--name", name,
+            "--distpath", str(out_dir),
            "--windowed"]
     cmd += _common_args(onedir, target_arch)
     cmd += _icon_arg()
@@ -119,10 +131,12 @@ def build_gui(onedir: bool, target_arch: str | None,
 
 
 def build_cli(onedir: bool, target_arch: str | None,
-              out_suffix: str | None) -> None:
+              out_suffix: str | None,
+              out_dir: Path) -> None:
     name = CLI_NAME + (f"-{out_suffix}" if out_suffix else "")
     cmd = [sys.executable, "-m", "PyInstaller",
            "--name", name,
+            "--distpath", str(out_dir),
            "--console"]
     cmd += _common_args(onedir, target_arch)
     cmd += _icon_arg()
@@ -141,10 +155,9 @@ def _gh(*args: str, capture: bool = False) -> "subprocess.CompletedProcess[str]"
     return subprocess.run(cmd, check=True)
 
 
-def remote_build(target_platform: str) -> None:
-    """Trigger GitHub Actions, wait for completion, extract artifacts to dist/."""
-    dist = ROOT / "dist"
-    dist.mkdir(exist_ok=True)
+def remote_build(target_platform: str, out_dir: Path) -> None:
+    """Trigger GitHub Actions, wait for completion, extract artifacts to out_dir."""
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Trigger workflow ──────────────────────────────────────────────────
     print(f"[remote] Triggering {WORKFLOW} on GitHub (platform={target_platform}) ...")
@@ -202,7 +215,7 @@ def remote_build(target_platform: str) -> None:
     # ── Download + extract artifacts ──────────────────────────────────────
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        print(f"[remote] Downloading artifacts to {dist} ...")
+        print(f"[remote] Downloading artifacts to {_display_path(out_dir)} ...")
         _gh("run", "download", run_id,
             "--repo", REPO,
             "-D", str(tmp_path))
@@ -215,12 +228,12 @@ def remote_build(target_platform: str) -> None:
                     "ipqualitychecker-" + label_filter):
                 continue
             for zip_file in artifact_dir.glob("*.zip"):
-                print(f"  Extracting {zip_file.name} -> dist/")
+                print(f"  Extracting {zip_file.name} -> {_display_path(out_dir)}/")
                 with zipfile.ZipFile(zip_file) as zf:
-                    zf.extractall(dist)
+                    zf.extractall(out_dir)
 
-    print(f"\n[OK] Remote build complete. Output in {dist}")
-    for item in sorted(dist.iterdir()):
+    print(f"\n[OK] Remote build complete. Output in {_display_path(out_dir)}")
+    for item in sorted(out_dir.iterdir()):
         print(f"  {item.name}")
 
 
@@ -241,6 +254,8 @@ def main():
     parser.add_argument("--out-suffix", default=None,
                         help="append a suffix to output names "
                              "(e.g. IPQualityChecker-arm64.app)")
+    parser.add_argument("--out-dir", default="dist",
+                        help="output directory (default: dist)")
     parser.add_argument("--clean", action="store_true",
                         help="purge build/ and dist/ first")
     parser.add_argument("--cli", action="store_true",
@@ -248,10 +263,18 @@ def main():
     parser.add_argument("--cli-only", action="store_true",
                         help="only build CLI, skip GUI")
     args = parser.parse_args()
+    out_dir = Path(args.out_dir)
+    if not out_dir.is_absolute():
+        out_dir = ROOT / out_dir
+    out_dir = out_dir.resolve()
+
+    # Safety guard: never allow output directory to be the project root.
+    if out_dir == ROOT.resolve():
+        sys.exit("[ERROR] --out-dir cannot be project root. Please use a subdir like dist/.")
 
     # ── Remote build path ──
     if args.remote:
-        remote_build(args.platform)
+        remote_build(args.platform, out_dir)
         return
 
     # ── Smart default ──
@@ -268,7 +291,7 @@ def main():
               "arch is determined by which Python interpreter you invoke.")
 
     if args.clean:
-        for d in ("build", "dist",
+        for d in ("build",
                    f"{APP_NAME}.spec", f"{CLI_NAME}.spec",
                    f"{APP_NAME}-{args.out_suffix}.spec" if args.out_suffix else "",
                    f"{CLI_NAME}-{args.out_suffix}.spec" if args.out_suffix else ""):
@@ -279,26 +302,28 @@ def main():
                 shutil.rmtree(p, ignore_errors=True)
             elif p.is_file():
                 p.unlink(missing_ok=True)
-        print("[OK] cleaned build/ dist/ *.spec")
+        if out_dir.exists() and out_dir.is_dir():
+            shutil.rmtree(out_dir, ignore_errors=True)
+        print(f"[OK] cleaned build/ {_display_path(out_dir)}/ *.spec")
 
     if not args.cli_only:
-        build_gui(args.onedir, args.arch, args.out_suffix)
+        build_gui(args.onedir, args.arch, args.out_suffix, out_dir)
     if args.cli or args.cli_only:
-        build_cli(args.onedir, args.arch, args.out_suffix)
+        build_cli(args.onedir, args.arch, args.out_suffix, out_dir)
 
-    print(f"\n[OK] build complete. Output in {ROOT/'dist'}")
+    print(f"\n[OK] build complete. Output in {_display_path(out_dir)}")
     sys_name = platform.system()
     gui_name = APP_NAME + (f"-{args.out_suffix}" if args.out_suffix else "")
     cli_name = CLI_NAME + (f"-{args.out_suffix}" if args.out_suffix else "")
     if sys_name == "Darwin":
-        print(f"  GUI:  {ROOT/'dist'/f'{gui_name}.app'}")
+        print(f"  GUI:  {out_dir/f'{gui_name}.app'}")
     elif sys_name == "Windows":
-        print(f"  GUI:  {ROOT/'dist'/f'{gui_name}.exe'}")
+        print(f"  GUI:  {out_dir/f'{gui_name}.exe'}")
     else:
-        print(f"  GUI:  {ROOT/'dist'/gui_name}")
+        print(f"  GUI:  {out_dir/gui_name}")
     if args.cli or args.cli_only:
         ext = ".exe" if sys_name == "Windows" else ""
-        print(f"  CLI:  {ROOT/'dist'/(cli_name + ext)}")
+        print(f"  CLI:  {out_dir/(cli_name + ext)}")
 
 
 if __name__ == "__main__":

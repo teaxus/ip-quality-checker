@@ -261,3 +261,62 @@ ip-quality-checker/
 - **ping0.cc / Scamalytics 等 CF 强保护站点**，无 Key 路径下偶尔解析成功偶尔被挡。失败时会输出 verify URL 让你手动核对。
 - **Disney+ region** 需要其 GraphQL `device.graphql` 端点的最新 api-key（Disney 已收紧），目前只能确认是否被禁，不能稳定提取国家码。
 - **net quality 的「三网回程」** （xykt/net.sh 的核心）依赖 nexttrace/mtr + ASN 库做逐跳分类，跨平台移植较重，本工具尚未集成；CN 境内回程分析推荐直接跑 xykt/net.sh。
+
+---
+
+## 📝 日志和故障排除 (v1.2.1+)
+
+### 日志文件位置
+
+所有事件（包括低于 40 分的警报和进程清理）都被持久化到日志文件：
+
+| 系统 | 路径 |
+|---|---|
+| macOS | `~/.ip-quality-checker/logs/YYYYMMDD.log` |
+| Windows | `C:\Users\<username>\.ip-quality-checker\logs\YYYYMMDD.log` |
+| Linux | `~/.ip-quality-checker/logs/YYYYMMDD.log` |
+
+### 🔴 查看低分警报日志
+
+**GUI 方式**（推荐）：
+1. 点击 **设置** → 向下滚动到 **日志管理**
+2. 点击 **打开今日日志** 按钮
+3. 搜索 `警报` 或 `低分` 关键词
+
+**命令行方式**：
+```bash
+# macOS / Linux
+grep "警报\|低分" ~/.ip-quality-checker/logs/$(date +%Y%m%d).log
+
+# Windows PowerShell
+Select-String -Path "$env:USERPROFILE\.ip-quality-checker\logs\*.log" -Pattern "警报|低分"
+```
+
+### 🐛 Windows 窗口闪现问题
+
+如果启动时看到窗口闪现又消失：
+
+1. 查看日志文件：`%USERPROFILE%\.ip-quality-checker\logs\YYYYMMDD.log`
+2. 找到 `FATAL ERROR` 行，了解具体错误
+3. 常见原因及解决：
+   - **缺少依赖**：`pip install -r requirements.txt`
+   - **Python 版本**：需要 3.9+，推荐 3.11+
+   - **权限问题**：确保对 `~/.ip-quality-checker/` 目录有读写权限
+
+更多细节见 [WINDOWS_FIXES.md](WINDOWS_FIXES.md)。
+
+### 📊 日志示例
+
+```log
+[14:24:05] === IP Quality Checker 启动 2026-05-11 14:24:05 ===
+[14:24:05] 平台: Windows · Python: 3.13.0
+[14:24:05] === 开始检测  2026-05-11 14:24:05 ===
+[14:24:05] 公网 IP: 123.45.67.89  IPv6: 无
+[14:24:10] [    OK] IPinfo — Shanghai, China · AS1234 ISP
+[14:24:15] [  WARN] Scamalytics — 风险分 25/100 · Low Risk
+[14:24:20] 🔴 警报: 评分 35 低于阈值 40 — 浮窗持续闪烁
+[14:24:20] 🔪 低分自动清理: 已结束 2 个进程 · 0 个失败
+         · 1234 claude_proxy (python claude_proxy.py)
+         · 5678 ⚡ 连接 Claude: 123.45.67.89:443 (api.anthropic.com)
+[14:24:20] === 检测完成  评分 35/100 ===
+```
