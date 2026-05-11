@@ -36,18 +36,58 @@ Design notes:
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
+import ssl
 import statistics
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+import certifi
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
 
 from config import get_api_key, load_config
+
+# ---------------------------------------------------------------------------
+# Windows PyInstaller SSL fix
+# requests/urllib3 on Windows frozen builds can't find CA bundle, causing
+# UNEXPECTED_EOF_WHILE_READING. Force certifi's bundle explicitly.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+
+class _SSLAdapter(HTTPAdapter):
+    """Custom adapter that fixes UNEXPECTED_EOF_WHILE_READING on Windows by
+    using certifi's CA bundle and a lenient SSL context."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context()
+        ctx.load_verify_locations(certifi.where())
+        # Allow legacy renegotiation — fixes EOF on some Cloudflare edges
+        ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0)
+        kwargs["ssl_context"] = ctx
+        super().init_poolmanager(*args, **kwargs)
+
+
+def _session() -> requests.Session:
+    """Return a requests.Session with the SSL fix applied."""
+    s = requests.Session()
+    adapter = _SSLAdapter()
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+
+# Module-level session — reused across all requests for efficiency
+_SESSION = _session()
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 "
@@ -85,7 +125,7 @@ def get_my_ip() -> str:
                 "https://api-ipv4.ip.sb/ip",             # v4-only
                 "https://4.ifconfig.co/ip"):             # v4-only
         try:
-            r = requests.get(url, headers=HEADERS, timeout=_timeout())
+            r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
             if r.status_code == 200:
                 txt = r.text.strip()
                 if re.match(r"^\d+\.\d+\.\d+\.\d+$", txt):
@@ -100,7 +140,7 @@ def get_my_ipv6() -> str:
                 "https://ipv6.icanhazip.com",
                 "https://api-ipv6.ip.sb/ip"):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=_timeout())
+            r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
             if r.status_code == 200:
                 txt = r.text.strip()
                 if ":" in txt and len(txt) < 64:
@@ -136,7 +176,7 @@ def check_ipinfo(ip: str) -> dict:
     # 1. token-aware basic lookup
     try:
         params = {"token": token} if token else {}
-        r = requests.get(api_url, headers=HEADERS, params=params,
+        r = _SESSION.get(api_url, headers=HEADERS, params=params,
                          timeout=_timeout())
         api_status = f"HTTP {r.status_code}"
         if r.status_code == 200:
@@ -151,7 +191,7 @@ def check_ipinfo(ip: str) -> dict:
 
     # 2. keyless widget (privacy flags)
     try:
-        r2 = requests.get(widget_url, headers=HEADERS, timeout=_timeout())
+        r2 = _SESSION.get(widget_url, headers=HEADERS, timeout=_timeout())
         if r2.status_code == 200:
             widget_data = (r2.json() or {}).get("data", {}) or {}
     except Exception:
@@ -310,7 +350,7 @@ def check_ip_api(ip: str) -> dict:
               "timezone,isp,org,as,asname,reverse,mobile,proxy,hosting,query")
     url = f"http://ip-api.com/json/{ip}?fields={fields}"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout())
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
         d = r.json()
         if d.get("status") != "success":
             return _result("ip-api.com", "error", d.get("message", "失败"),
@@ -332,7 +372,7 @@ def check_ip_api(ip: str) -> dict:
 def check_ipapi_is(ip: str) -> dict:
     url = f"https://api.ipapi.is/?q={ip}"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout())
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
         if r.status_code != 200:
             return _result("ipapi.is", "error", f"HTTP {r.status_code}",
                            verify_url=f"https://ipapi.is/?q={ip}", request_url=url)
@@ -378,7 +418,7 @@ def check_ip2location(ip: str) -> dict:
     key = get_api_key("ip2location")
     url = f"https://api.ip2location.io/?ip={ip}" + (f"&key={key}" if key else "")
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout())
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
         if r.status_code != 200:
             return _result("IP2Location", "error", f"HTTP {r.status_code}",
                            verify_url=f"https://www.ip2location.io/{ip}", request_url=url)
@@ -405,7 +445,7 @@ def check_ip2location(ip: str) -> dict:
 def check_dbip(ip: str) -> dict:
     url = f"https://db-ip.com/{ip}"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout())
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
         if r.status_code != 200:
             return _result("DB-IP", "error", f"HTTP {r.status_code}",
                            verify_url=url, request_url=url)
@@ -447,7 +487,7 @@ def check_dbip(ip: str) -> dict:
 def check_scamalytics(ip: str) -> dict:
     url = f"https://scamalytics.com/ip/{ip}"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout())
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
         if r.status_code == 200 and "Fraud Score" in r.text:
             m_score = re.search(r"Fraud Score:\s*(\d+)", r.text)
             m_risk = re.search(r"(Very High Risk|High Risk|Medium Risk|Low Risk)", r.text)
@@ -488,7 +528,7 @@ def check_ipqs(ip: str) -> dict:
     if key:
         url = f"https://ipqualityscore.com/api/json/ip/{key}/{ip}?strictness=1"
         try:
-            r = requests.get(url, headers=HEADERS, timeout=_timeout())
+            r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
             d = r.json()
             if not d.get("success", False):
                 msg = d.get("message", "失败")
@@ -538,7 +578,7 @@ def check_abuseipdb(ip: str) -> dict:
                        verify_url=f"https://www.abuseipdb.com/check/{ip}")
     url = "https://api.abuseipdb.com/api/v2/check"
     try:
-        r = requests.get(
+        r = _SESSION.get(
             url,
             headers={**HEADERS, "Key": key, "Accept": "application/json"},
             params={"ipAddress": ip, "maxAgeInDays": 90, "verbose": "true"},
@@ -588,7 +628,7 @@ def check_abuseipdb(ip: str) -> dict:
 def check_ping0(ip: str) -> dict:
     url = f"https://ping0.cc/ip/{ip}"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout())
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
         if r.status_code != 200:
             return _result("ping0.cc", "manual",
                            f"HTTP {r.status_code} · 站点不可达，请在浏览器打开",
@@ -669,7 +709,7 @@ def _trace(host: str) -> dict:
     url = f"https://{host}/cdn-cgi/trace"
     try:
         t0 = time.perf_counter()
-        r = requests.get(url, headers=HEADERS, timeout=_timeout())
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout())
         ms = int((time.perf_counter() - t0) * 1000)
         if r.status_code != 200:
             return {"_error": f"HTTP {r.status_code}", "_url": url, "_ms": ms}
@@ -691,7 +731,7 @@ def _geo_for(ip: str) -> dict:
     if not ip:
         return {}
     try:
-        r = requests.get(
+        r = _SESSION.get(
             f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,"
             f"regionName,city,zip,timezone,isp,org,as,asname,reverse,"
             f"mobile,proxy,hosting,query",
@@ -859,7 +899,7 @@ def check_iprisk_score(ip: str) -> dict:
     side regardless of the score the API returns.)"""
     url = f"https://ip.net.coffee/api/iprisk/{ip}"
     try:
-        r = requests.get(url, headers={**HEADERS,
+        r = _SESSION.get(url, headers={**HEADERS,
                                        "Referer": "https://ip.net.coffee/"},
                          timeout=_timeout())
         if r.status_code != 200:
@@ -918,7 +958,7 @@ def _http_latency(url: str, method: str = "GET") -> dict:
     """Time a single HTTP request, return ms + status."""
     t0 = time.perf_counter()
     try:
-        r = requests.request(method, url, headers=HEADERS,
+        r = _SESSION.request(method, url, headers=HEADERS,
                              timeout=_timeout(), allow_redirects=True)
         ms = int((time.perf_counter() - t0) * 1000)
         return {"ok": True, "ms": ms, "http": r.status_code, "url": url}
@@ -944,7 +984,7 @@ def check_claude_reachability() -> dict:
     claude_loc = ""
     if a.get("ok"):
         try:
-            r = requests.get("https://claude.ai/cdn-cgi/trace",
+            r = _SESSION.get("https://claude.ai/cdn-cgi/trace",
                              headers=HEADERS, timeout=_timeout())
             m = re.search(r"loc=([A-Z]{2})", r.text or "")
             claude_loc = m.group(1) if m else ""
@@ -975,7 +1015,7 @@ def check_claude_status() -> dict:
     """status.claude.com (formerly status.anthropic.com) summary."""
     url = "https://status.claude.com/api/v2/status.json"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout(),
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout(),
                          allow_redirects=True)
         if r.status_code != 200:
             return _result("Claude 服务状态", "error", f"HTTP {r.status_code}",
@@ -1017,7 +1057,7 @@ def check_claude_unlock() -> dict:
     url = "https://claude.ai/"
     verify = "https://claude.ai/"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout(),
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout(),
                          allow_redirects=True)
         final = r.url
         if "app-unavailable-in-region" in final or \
@@ -1049,7 +1089,7 @@ def check_chatgpt_unlock() -> dict:
     # 1) Compliance endpoint — web availability
     cu = "https://api.openai.com/compliance/cookie_requirements"
     try:
-        r1 = requests.get(cu,
+        r1 = _SESSION.get(cu,
                           headers={**HEADERS, "Authorization": "Bearer null",
                                    "Accept": "*/*"},
                           timeout=_timeout())
@@ -1064,7 +1104,7 @@ def check_chatgpt_unlock() -> dict:
     # 403 + Cloudflare cf_details body is just bot challenge, NOT a geo block.
     iu = "https://ios.chat.openai.com/"
     try:
-        r2 = requests.get(iu, headers=HEADERS, timeout=_timeout(),
+        r2 = _SESSION.get(iu, headers=HEADERS, timeout=_timeout(),
                           allow_redirects=True)
         detail["ios_status"] = r2.status_code
         body = (r2.text or "")[:2000]
@@ -1077,7 +1117,7 @@ def check_chatgpt_unlock() -> dict:
         detail["ios_error"] = str(e)
     # 3) Country
     try:
-        r3 = requests.get("https://chat.openai.com/cdn-cgi/trace",
+        r3 = _SESSION.get("https://chat.openai.com/cdn-cgi/trace",
                           headers=HEADERS, timeout=_timeout())
         m = re.search(r"loc=([A-Z]{2})", r3.text or "")
         loc = m.group(1) if m else ""
@@ -1102,7 +1142,7 @@ def check_gemini_unlock() -> dict:
     """lmc999 L4544 — sentinel string."""
     url = "https://gemini.google.com/"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout(),
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout(),
                          allow_redirects=True)
         body = r.text or ""
         has_marker = "45631641,null,true" in body
@@ -1133,7 +1173,7 @@ def check_netflix() -> dict:
     for tid, label in NETFLIX_TITLES:
         u = f"https://www.netflix.com/title/{tid}"
         try:
-            r = requests.get(u, headers=HEADERS, timeout=_timeout(),
+            r = _SESSION.get(u, headers=HEADERS, timeout=_timeout(),
                              allow_redirects=True)
             body = r.text or ""
             results[tid] = {
@@ -1189,7 +1229,7 @@ def check_disney_plus() -> dict:
     verify = "https://www.disneyplus.com/"
     try:
         # ── A. /devices ──
-        r1 = requests.post(
+        r1 = _SESSION.post(
             f"{base}/devices",
             headers={**HEADERS, "Authorization": f"Bearer {BEARER}",
                      "Content-Type": "application/json"},
@@ -1209,7 +1249,7 @@ def check_disney_plus() -> dict:
         # ── B. /token ──
         token_blocked = False
         if assertion:
-            r2 = requests.post(
+            r2 = _SESSION.post(
                 f"{base}/token",
                 headers={**HEADERS,
                          "Authorization": f"Bearer {BEARER}",
@@ -1234,7 +1274,7 @@ def check_disney_plus() -> dict:
         cc = "?"
         preview_blocked = False
         try:
-            r3 = requests.get(verify, headers=HEADERS,
+            r3 = _SESSION.get(verify, headers=HEADERS,
                               timeout=_timeout(), allow_redirects=True)
             final = r3.url
             detail["home_final_url"] = final
@@ -1277,7 +1317,7 @@ def check_youtube_premium() -> dict:
                "GPS=1; VISITOR_INFO1_LIVE=4VwPMkB7W5A; "
                "PREF=tz=Asia.Shanghai; _gcl_au=1.1.1809531354.1646633279")
     try:
-        r = requests.get(url, headers={**HEADERS, "Cookie": cookies,
+        r = _SESSION.get(url, headers={**HEADERS, "Cookie": cookies,
                                        "Accept-Language": "en"},
                          timeout=_timeout(), allow_redirects=True)
         body = r.text or ""
@@ -1309,7 +1349,7 @@ def check_tiktok() -> dict:
     """xykt L1327."""
     url = "https://www.tiktok.com/"
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout(),
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout(),
                          allow_redirects=True)
         body = r.text or ""
         m = re.search(r'"region":\s*"([A-Z]{2})"', body)
@@ -1340,7 +1380,7 @@ def check_spotify() -> dict:
     """
     url = "https://spclient.wg.spotify.com/signup/public/v1/account"
     try:
-        r = requests.post(url, headers=HEADERS, timeout=_timeout(),
+        r = _SESSION.post(url, headers=HEADERS, timeout=_timeout(),
                           data={"birth_day": "11", "birth_month": "11",
                                 "birth_year": "2000",
                                 "collect_personal_info": "undefined",
@@ -1415,7 +1455,7 @@ SITE_TARGETS = [
 def check_site(name: str, url: str, expected: int) -> dict:
     t0 = time.perf_counter()
     try:
-        r = requests.get(url, headers=HEADERS, timeout=_timeout(),
+        r = _SESSION.get(url, headers=HEADERS, timeout=_timeout(),
                          allow_redirects=True)
         ms = int((time.perf_counter() - t0) * 1000)
         ok = r.status_code == expected or 200 <= r.status_code < 400
@@ -1547,7 +1587,7 @@ def _system_dns_servers() -> list[str]:
 def _geolocate_ip_quick(ip: str) -> dict:
     """Best-effort country/ASN lookup for an IP using ip-api (no key)."""
     try:
-        r = requests.get(
+        r = _SESSION.get(
             f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,"
             f"isp,as,org,query", headers=HEADERS, timeout=_timeout())
         if r.status_code == 200:
@@ -1689,7 +1729,7 @@ def check_speed() -> dict:
     url = "https://speed.cloudflare.com/__down?bytes=10000000"
     try:
         t0 = time.perf_counter()
-        with requests.get(url, headers=HEADERS, stream=True, timeout=30) as r:
+        with _SESSION.get(url, headers=HEADERS, stream=True, timeout=30) as r:
             if r.status_code != 200:
                 return _result("下载速度", "fail", f"HTTP {r.status_code}",
                                verify_url="https://speed.cloudflare.com/",
@@ -1727,7 +1767,7 @@ def _claude_visible_ip() -> str:
     """Resolve the IP that claude.ai's edge actually sees us as.
     Falls back to provided IP only if trace fails."""
     try:
-        r = requests.get("https://claude.ai/cdn-cgi/trace",
+        r = _SESSION.get("https://claude.ai/cdn-cgi/trace",
                          headers=HEADERS, timeout=_timeout())
         if r.status_code == 200:
             for line in r.text.splitlines():
