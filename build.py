@@ -163,10 +163,18 @@ def remote_build(target_platform: str, out_dir: Path) -> None:
 
     # ── Trigger workflow ──────────────────────────────────────────────────
     print(f"[remote] Triggering {WORKFLOW} on GitHub (platform={target_platform}) ...")
-    _gh("workflow", "run", WORKFLOW,
-        "--repo", REPO,
-        "--ref", "main",
-        "-f", f"platform={target_platform}")
+    for _retry in range(10):
+        try:
+            _gh("workflow", "run", WORKFLOW,
+                "--repo", REPO,
+                "--ref", "main",
+                "-f", f"platform={target_platform}")
+            break
+        except subprocess.CalledProcessError as e:
+            print(f"  [network] gh workflow run failed (retry {_retry+1}/10): {e}")
+            time.sleep(15)
+    else:
+        sys.exit("[remote] ERROR: could not trigger workflow after 10 retries")
 
     # Give GitHub a moment to register the new run
     time.sleep(5)
