@@ -172,12 +172,20 @@ def remote_build(target_platform: str, out_dir: Path) -> None:
     time.sleep(5)
 
     # ── Get the latest run ID ─────────────────────────────────────────────
-    result = _gh("run", "list",
-                 "--repo", REPO,
-                 "--workflow", WORKFLOW,
-                 "--limit", "1",
-                 "--json", "databaseId,status,event",
-                 capture=True)
+    for _retry in range(10):
+        try:
+            result = _gh("run", "list",
+                         "--repo", REPO,
+                         "--workflow", WORKFLOW,
+                         "--limit", "1",
+                         "--json", "databaseId,status,event",
+                         capture=True)
+            break
+        except subprocess.CalledProcessError as e:
+            print(f"  [network] gh run list failed (retry {_retry+1}/10): {e}")
+            time.sleep(10)
+    else:
+        sys.exit("[remote] ERROR: could not fetch run list after 10 retries")
     runs = json.loads(result.stdout)
     if not runs:
         sys.exit("[remote] ERROR: no run found after triggering workflow")
@@ -188,10 +196,21 @@ def remote_build(target_platform: str, out_dir: Path) -> None:
     label_filter = target_platform  # 'windows' / 'macos' / 'all'
     print("[remote] Waiting for build to complete (polling every 15s) ...")
     for attempt in range(120):  # up to 30 minutes
-        r = _gh("run", "view", run_id,
-                "--repo", REPO,
-                "--json", "status,conclusion,jobs",
-                capture=True)
+        # Retry up to 5 times on network failure before giving up
+        for _retry in range(5):
+            try:
+                r = _gh("run", "view", run_id,
+                        "--repo", REPO,
+                        "--json", "status,conclusion,jobs",
+                        capture=True)
+                break
+            except subprocess.CalledProcessError as e:
+                print(f"  [network] gh run view failed (retry {_retry+1}/5): {e}")
+                time.sleep(10)
+        else:
+            print("  [network] All retries exhausted, skipping this poll cycle.")
+            time.sleep(15)
+            continue
         data = json.loads(r.stdout)
         jobs = data["jobs"]
 
