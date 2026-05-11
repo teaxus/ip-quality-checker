@@ -1864,7 +1864,8 @@ class App(ctk.CTk):
             elif sysname == "Windows":
                 r = subprocess.run(
                     ["route", "print", "0.0.0.0"],
-                    capture_output=True, text=True, timeout=2)
+                    capture_output=True, text=True, timeout=2,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 for line in (r.stdout or "").splitlines():
                     parts = line.split()
                     if len(parts) >= 4 and parts[0] == "0.0.0.0":
