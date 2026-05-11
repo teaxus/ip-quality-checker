@@ -238,9 +238,20 @@ def remote_build(target_platform: str, out_dir: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         print(f"[remote] Downloading artifacts to {_display_path(out_dir)} ...")
-        _gh("run", "download", run_id,
-            "--repo", REPO,
-            "-D", str(tmp_path))
+        for _retry in range(5):
+            try:
+                _gh("run", "download", run_id,
+                    "--repo", REPO,
+                    "-D", str(tmp_path))
+                break
+            except subprocess.CalledProcessError as e:
+                print(f"  [network] download failed (retry {_retry+1}/5): {e}")
+                # Clean up partial downloads before retrying
+                for p in tmp_path.iterdir():
+                    shutil.rmtree(p) if p.is_dir() else p.unlink()
+                time.sleep(15)
+        else:
+            sys.exit("[remote] ERROR: artifact download failed after 5 retries")
 
         for artifact_dir in tmp_path.iterdir():
             if not artifact_dir.is_dir():
