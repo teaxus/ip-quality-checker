@@ -80,6 +80,8 @@ def _common_args(onedir: bool, target_arch: str | None) -> list[str]:
         # and dynamic imports are not auto-detected by PyInstaller.
         "--collect-all", "customtkinter",
         "--collect-all", "darkdetect",
+        # Bundle certifi's CA bundle so SSL verification works in frozen app
+        "--collect-all", "certifi",
     ]
     # macOS-only: PyInstaller's --target-arch produces an arm64-only,
     # x86_64-only, or universal2 binary. Requires Python itself to be

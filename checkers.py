@@ -60,21 +60,46 @@ from config import get_api_key, load_config
 # requests/urllib3 on Windows frozen builds can't find CA bundle, causing
 # UNEXPECTED_EOF_WHILE_READING. Force certifi's bundle explicitly.
 # ---------------------------------------------------------------------------
-os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+# Set env vars early so any other SSL code also picks up certifi
+os.environ.setdefault("SSL_CERT_FILE", _certifi_ca())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", _certifi_ca())
+
+
+def _setup_ssl_env() -> None:
+    ca = _certifi_ca() if "_certifi_ca" in dir() else certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", ca)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", ca)
+
+
+def _certifi_ca() -> str:
+    """Return certifi CA bundle path, works in both dev and PyInstaller frozen."""
+    if hasattr(sys, "_MEIPASS"):
+        ca = os.path.join(sys._MEIPASS, "certifi", "cacert.pem")
+        if os.path.exists(ca):
+            return ca
+    return certifi.where()
 
 
 class _SSLAdapter(HTTPAdapter):
     """Custom adapter that fixes UNEXPECTED_EOF_WHILE_READING on Windows by
     using certifi's CA bundle and a lenient SSL context."""
 
-    def init_poolmanager(self, *args, **kwargs):
+    def _make_ctx(self) -> ssl.SSLContext:
         ctx = create_urllib3_context()
-        ctx.load_verify_locations(certifi.where())
+        ctx.load_verify_locations(_certifi_ca())
         # Allow legacy renegotiation — fixes EOF on some Cloudflare edges
         ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0)
-        kwargs["ssl_context"] = ctx
+        # Ignore unexpected EOF from server (common on Windows TLS 1.3, GFW, CDN)
+        ctx.options |= getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+        return ctx
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = self._make_ctx()
         super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        proxy_kwargs["ssl_context"] = self._make_ctx()
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
 
 
 def _session() -> requests.Session:
