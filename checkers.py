@@ -60,16 +60,6 @@ from config import get_api_key, load_config
 # requests/urllib3 on Windows frozen builds can't find CA bundle, causing
 # UNEXPECTED_EOF_WHILE_READING. Force certifi's bundle explicitly.
 # ---------------------------------------------------------------------------
-# Set env vars early so any other SSL code also picks up certifi
-os.environ.setdefault("SSL_CERT_FILE", _certifi_ca())
-os.environ.setdefault("REQUESTS_CA_BUNDLE", _certifi_ca())
-
-
-def _setup_ssl_env() -> None:
-    ca = _certifi_ca() if "_certifi_ca" in dir() else certifi.where()
-    os.environ.setdefault("SSL_CERT_FILE", ca)
-    os.environ.setdefault("REQUESTS_CA_BUNDLE", ca)
-
 
 def _certifi_ca() -> str:
     """Return certifi CA bundle path, works in both dev and PyInstaller frozen."""
@@ -78,6 +68,11 @@ def _certifi_ca() -> str:
         if os.path.exists(ca):
             return ca
     return certifi.where()
+
+
+# Set env vars early so any other SSL code also picks up certifi
+os.environ.setdefault("SSL_CERT_FILE", _certifi_ca())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", _certifi_ca())
 
 
 class _SSLAdapter(HTTPAdapter):
