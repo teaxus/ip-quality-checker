@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual envs
+.venv/
+.venv-build/
+.venv-build-*/
+venv/
+env/
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Icon intermediates
+icon.iconset/
+
+# Local config (contains API keys!)
+.ip-quality-checker/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
