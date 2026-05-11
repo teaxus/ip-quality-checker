@@ -74,12 +74,12 @@ jobs:
       - name: Build (macOS)
         if: matrix.os == 'macos'
         run: |
-          python build.py --clean --cli --arch ${{ matrix.arch }} --out-suffix ${{ matrix.label }}
+          python build.py --clean --arch ${{ matrix.arch }} --out-suffix ${{ matrix.label }}
 
       - name: Build (Windows)
         if: matrix.os == 'windows'
         run: |
-          python build.py --clean --cli --out-suffix ${{ matrix.label }}
+          python build.py --clean --out-suffix ${{ matrix.label }}
 
       - name: Package macOS artifact
         if: matrix.os == 'macos'
@@ -87,14 +87,13 @@ jobs:
           cd dist
           # zip up the .app bundle and the CLI binary
           zip -r -y IPQualityChecker-${{ matrix.label }}.zip \
-              IPQualityChecker-${{ matrix.label }}.app \
-              ipqc-${{ matrix.label }}
+              IPQualityChecker-${{ matrix.label }}.app
 
       - name: Package Windows artifact
         if: matrix.os == 'windows'
         run: |
           cd dist
-          Compress-Archive -Path "IPQualityChecker-${{ matrix.label }}.exe","ipqc-${{ matrix.label }}.exe" `
+          Compress-Archive -Path "IPQualityChecker-${{ matrix.label }}.exe" `
                            -DestinationPath "IPQualityChecker-${{ matrix.label }}.zip"
 
       - name: Upload artifact
