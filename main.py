@@ -2057,8 +2057,10 @@ class App(ctk.CTk):
         card = self._ensure_card(key, title)
         card.set_result(res)
         self.results.append({**res, "_key": key})
+        err_detail = res.get("error") or ""
+        err_suffix = f" [{err_detail[:100]}]" if err_detail else ""
         self._log(f"[{res.get('status','?').upper():>6}] {title}: "
-                  f"{res.get('summary','')}")
+                  f"{res.get('summary','')}{err_suffix}")
         # Refresh the top-banner geo line whenever a richer source comes in.
         # We re-derive every time (no early-return) so a later source like
         # ip-api can fill in timezone after ipinfo got us city first.

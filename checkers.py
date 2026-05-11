@@ -51,7 +51,7 @@ from typing import Any, Callable
 import certifi
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.ssl_ import create_urllib3_context
+# create_urllib3_context is no longer used; ssl.create_default_context() is used instead
 
 from config import get_api_key, load_config
 
@@ -80,8 +80,17 @@ class _SSLAdapter(HTTPAdapter):
     using certifi's CA bundle and a lenient SSL context."""
 
     def _make_ctx(self) -> ssl.SSLContext:
-        ctx = create_urllib3_context()
-        ctx.load_verify_locations(_certifi_ca())
+        # create_default_context() loads the platform CA store:
+        #   - Windows: Windows Certificate Store (all system-trusted CAs)
+        #   - macOS: system Keychain
+        #   - Linux: system CA bundle
+        # This is more reliable than create_urllib3_context() which only uses certifi.
+        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        # Also load certifi as a supplement (covers any gaps)
+        try:
+            ctx.load_verify_locations(_certifi_ca())
+        except Exception:
+            pass
         # Allow legacy renegotiation — fixes EOF on some Cloudflare edges
         ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0)
         # Ignore unexpected EOF from server (common on Windows TLS 1.3, GFW, CDN)
