@@ -146,7 +146,7 @@ def main():
           f"platform: {platform.system()}{suffix}")
 
     if args.arch and platform.system() != "Darwin":
-        print("⚠ --arch is only honoured on macOS. On Windows / Linux the "
+        print("[WARN] --arch is only honoured on macOS. On Windows / Linux the "
               "arch is determined by which Python interpreter you invoke.")
 
     if args.clean:
@@ -161,14 +161,14 @@ def main():
                 shutil.rmtree(p, ignore_errors=True)
             elif p.is_file():
                 p.unlink(missing_ok=True)
-        print("✓ cleaned build/ dist/ *.spec")
+        print("[OK] cleaned build/ dist/ *.spec")
 
     if not args.cli_only:
         build_gui(args.onedir, args.arch, args.out_suffix)
     if args.cli or args.cli_only:
         build_cli(args.onedir, args.arch, args.out_suffix)
 
-    print(f"\n✓ build complete. Output in {ROOT/'dist'}")
+    print(f"\n[OK] build complete. Output in {ROOT/'dist'}")
     sys_name = platform.system()
     gui_name = APP_NAME + (f"-{args.out_suffix}" if args.out_suffix else "")
     cli_name = CLI_NAME + (f"-{args.out_suffix}" if args.out_suffix else "")
