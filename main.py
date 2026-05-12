@@ -1316,8 +1316,7 @@ class App(ctk.CTk):
         # Always start maximized
         cfg = load_config()
         ui = cfg.get("ui") or {}
-        self.geometry("1240x900")  # set a sensible default before maximize
-        self.after(10, lambda: self._maximize_window())
+        self.geometry("1240x900")  # fallback size before maximize
 
         self.queue: queue.Queue = queue.Queue()
         self.results: list[dict] = []
@@ -1429,6 +1428,7 @@ class App(ctk.CTk):
             pass
         try:
             self.deiconify()
+            self._maximize_window()
             self.lift()
             self.focus_force()
         except Exception:
