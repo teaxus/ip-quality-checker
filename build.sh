@@ -41,6 +41,7 @@ show_help() {
 
 说明:
   - 该脚本会将剩余参数透传给 build.py。
+  - 仅使用当前项目目录下的 .venv/bin/python。
   - 远程构建需要先完成 gh 登录（gh auth login）。
 EOF
 }
@@ -50,18 +51,8 @@ find_python() {
     echo ".venv/bin/python"
     return 0
   fi
-  if [[ -x "venv/bin/python" ]]; then
-    echo "venv/bin/python"
-    return 0
-  fi
 
-  local cand
-  for cand in python3.13 python3.12 python3.11 python3 python; do
-    if command -v "$cand" >/dev/null 2>&1; then
-      echo "$cand"
-      return 0
-    fi
-  done
+  echo ""
   return 1
 }
 
@@ -115,7 +106,8 @@ fi
 
 PYTHON_BIN="$(find_python || true)"
 if [[ -z "$PYTHON_BIN" ]]; then
-  echo "错误：未找到 Python，请先安装 Python 3。" >&2
+  echo "错误：未找到项目虚拟环境 Python: .venv/bin/python" >&2
+  echo "请先在项目目录执行：python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt" >&2
   exit 1
 fi
 
