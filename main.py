@@ -1755,14 +1755,12 @@ class App(ctk.CTk):
                 self._splash = None
         except Exception:
             pass
-        # save current main geometry before switching
+        # save mode before switching
         try:
-            if self.state() != "withdrawn":
-                cfg = load_config()
-                cfg.setdefault("ui", {})
-                cfg["ui"]["main_geometry"] = self.geometry()
-                cfg["ui"]["mode"] = "widget"
-                save_config(cfg)
+            cfg = load_config()
+            cfg.setdefault("ui", {})
+            cfg["ui"]["mode"] = "widget"
+            save_config(cfg)
         except Exception:
             pass
         # Always destroy + recreate the widget. CTkFrame's rounded corners
