@@ -1313,17 +1313,11 @@ class App(ctk.CTk):
         except Exception:
             pass
 
-        # Restore saved window geometry, fall back to default
+        # Always start maximized
         cfg = load_config()
         ui = cfg.get("ui") or {}
-        saved_geo = ui.get("main_geometry") or ""
-        if saved_geo:
-            try:
-                self.geometry(saved_geo)
-            except Exception:
-                self.geometry("1240x900")
-        else:
-            self.geometry("1240x900")
+        self.geometry("1240x900")  # set a sensible default before maximize
+        self.after(10, lambda: self._maximize_window())
 
         self.queue: queue.Queue = queue.Queue()
         self.results: list[dict] = []
@@ -1411,6 +1405,19 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    def _maximize_window(self):
+        """Maximize the window in a cross-platform way."""
+        try:
+            system = platform.system()
+            if system == "Windows":
+                self.state("zoomed")
+            elif system == "Darwin":
+                self.attributes("-zoomed", True)
+            else:
+                self.attributes("-zoomed", True)
+        except Exception:
+            pass
+
     def _reveal_main(self):
         """Deiconify + lift the main window after init. Called from after()
         so the UI tree has a tick to settle before being mapped."""
@@ -1435,9 +1442,6 @@ class App(ctk.CTk):
                          and self.widget.winfo_exists()
                          and self.widget.state() != "withdrawn")
             cfg["ui"]["mode"] = "widget" if in_widget else "main"
-            # Save main window geometry only if main is currently visible
-            if self.state() != "withdrawn":
-                cfg["ui"]["main_geometry"] = self.geometry()
             if self.widget is not None and self.widget.winfo_exists():
                 cfg["ui"]["widget_pos"] = (
                     f"+{self.widget.winfo_x()}+{self.widget.winfo_y()}")
