@@ -1313,10 +1313,9 @@ class App(ctk.CTk):
         except Exception:
             pass
 
-        # Always start maximized
+        # Always start centered at fixed size
         cfg = load_config()
         ui = cfg.get("ui") or {}
-        self.geometry("1240x900")  # fallback size before maximize
 
         self.queue: queue.Queue = queue.Queue()
         self.results: list[dict] = []
@@ -1404,18 +1403,17 @@ class App(ctk.CTk):
         except Exception:
             pass
 
-    def _maximize_window(self):
-        """Maximize the window in a cross-platform way."""
+    def _center_window(self, w: int = 1240, h: int = 900):
+        """Position window in the center of the screen."""
         try:
-            system = platform.system()
-            if system == "Windows":
-                self.state("zoomed")
-            elif system == "Darwin":
-                self.attributes("-zoomed", True)
-            else:
-                self.attributes("-zoomed", True)
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = (sw - w) // 2
+            y = (sh - h) // 2
+            self.geometry(f"{w}x{h}+{x}+{y}")
         except Exception:
-            pass
+            self.geometry(f"{w}x{h}")
 
     def _reveal_main(self):
         """Deiconify + lift the main window after init. Called from after()
@@ -1428,7 +1426,7 @@ class App(ctk.CTk):
             pass
         try:
             self.deiconify()
-            self._maximize_window()
+            self._center_window()
             self.lift()
             self.focus_force()
         except Exception:
