@@ -1317,6 +1317,19 @@ class App(ctk.CTk):
         cfg = load_config()
         ui = cfg.get("ui") or {}
 
+        # Always start in main window mode and reset widget position so
+        # the app is always visible on launch regardless of last session state.
+        needs_save = False
+        if ui.get("mode") == "widget":
+            ui["mode"] = "main"
+            needs_save = True
+        if ui.get("widget_pos"):
+            ui["widget_pos"] = ""
+            needs_save = True
+        if needs_save:
+            cfg["ui"] = ui
+            save_config(cfg)
+
         self.queue: queue.Queue = queue.Queue()
         self.results: list[dict] = []
         self.running = False
@@ -1332,13 +1345,9 @@ class App(ctk.CTk):
         # Persist geometry + mode on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Restore floating-widget mode if user was in it last session;
-        # otherwise just show the (already-built) main window. This is
-        # the only place that deiconifies after __init__'s self.withdraw().
-        if ui.get("mode") == "widget":
-            self.after(200, self.show_widget)
-        else:
-            self.after(0, self._reveal_main)
+        # Always open in main window mode on startup.
+        # User can switch to widget mode manually after launch.
+        self.after(0, self._reveal_main)
 
         # ── periodic auto-refresh ──
         self._refresh_after_id: str | None = None
@@ -1409,10 +1418,12 @@ class App(ctk.CTk):
             self.update_idletasks()
             sw = self.winfo_screenwidth()
             sh = self.winfo_screenheight()
-            x = (sw - w) // 2
-            y = (sh - h) // 2
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 2)
             self.geometry(f"{w}x{h}+{x}+{y}")
-        except Exception:
+            self.update_idletasks()
+        except Exception as e:
+            logger.error(f"[_center_window] Exception: {e}", exc_info=True)
             self.geometry(f"{w}x{h}")
 
     def _reveal_main(self):
@@ -1427,6 +1438,14 @@ class App(ctk.CTk):
         try:
             self.deiconify()
             self._center_window()
+            
+            # macOS-specific: try to force window to front
+            try:
+                self.attributes("-topmost", True)
+                self.after(100, lambda: self.attributes("-topmost", False))
+            except Exception:
+                pass
+            
             self.lift()
             self.focus_force()
         except Exception:
@@ -1729,6 +1748,53 @@ class App(ctk.CTk):
         
         logger.set_logger_callback(log_callback)
         logger.log(f"=== IP Quality Checker 启动 {datetime.now():%Y-%m-%d %H:%M:%S} ===")
+
+        # Scan recent log files for crash records and surface them on startup
+        self.after(300, self._check_previous_crashes)
+
+    def _check_previous_crashes(self):
+        """Scan the last 3 days of log files for [CRASH] entries and display
+        them at the top of the log tab so the user can see what went wrong."""
+        crash_lines: list[str] = []
+        for log_file in logger.get_log_files_list()[:3]:
+            try:
+                text = log_file.read_text(encoding="utf-8", errors="replace")
+                if "[CRASH]" in text:
+                    # Collect the full crash block(s) from that file
+                    in_crash = False
+                    block: list[str] = []
+                    for line in text.splitlines():
+                        if "=" * 30 in line and in_crash:
+                            block.append(line)
+                            crash_lines.extend(block)
+                            block = []
+                            in_crash = False
+                        elif "[CRASH]" in line:
+                            if not in_crash:
+                                block = [f"\n--- 来自 {log_file.name} ---"]
+                                in_crash = True
+                            block.append(line)
+                        elif in_crash:
+                            block.append(line)
+            except Exception:
+                pass
+
+        if not crash_lines:
+            return
+
+        # Insert crash report at the very top of the log textbox
+        try:
+            header = [
+                "⚠️  检测到上次运行崩溃记录，详情如下（可到日志 Tab 查看）：",
+                "=" * 60,
+            ]
+            full_text = "\n".join(header + crash_lines) + "\n" + "=" * 60 + "\n\n"
+            self.log.insert("1.0", full_text)
+            self.log.see("1.0")
+            # Also write a summary into today's log for reference
+            logger.log(f"[启动] 检测到 {len([l for l in crash_lines if '[CRASH]' in l])} 条崩溃记录，详见历史日志")
+        except Exception:
+            pass
 
 
     def _ensure_card(self, key: str, title: str) -> ResultCard:
@@ -2411,6 +2477,11 @@ class App(ctk.CTk):
 
 # ============================================================================
 if __name__ == "__main__":
+    # Install global crash handlers — must be first so even early failures
+    # during App.__init__ or worker threads are written to the log file.
+    import logger as _logger_mod
+    _logger_mod.install_crash_handlers()
+
     # Single Tk root only. The splash is created inside App.__init__ as a
     # Toplevel(self), so customtkinter / Tk see exactly one interpreter
     # context. Creating two tk.Tk() instances on macOS causes the second

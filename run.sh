@@ -19,6 +19,16 @@ fi
 source .venv/bin/activate
 echo ">>> 使用 Python: $(python --version) at .venv/bin/python"
 
-python -m pip install --upgrade pip --quiet
-python -m pip install -r requirements.txt --quiet
-python main.py
+# 只在依赖缺失时才安装，避免每次启动都走网络
+if ! python -c "import customtkinter" 2>/dev/null; then
+  echo ">>> 首次运行，安装依赖..."
+  python -m pip install -r requirements.txt
+fi
+
+# Redirect OS-level stderr (e.g. macOS IMK messages, C-extension warnings)
+# to both the terminal and the log file so nothing is silently lost.
+LOG_DIR="$HOME/.ip-quality-checker/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/$(date +%Y%m%d).log"
+
+python main.py 2> >(tee -a "$LOG_FILE" >&2)
