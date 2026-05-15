@@ -19,6 +19,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import traceback
 import webbrowser
@@ -29,6 +30,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 import checkers
+import health
 from config import load_config, save_config
 import system_actions
 import logger
@@ -285,6 +287,18 @@ class ResultCard(ctk.CTkFrame):
             return
         DetailWindow(self, self.title, self.detail_data)
 
+    def reset(self) -> None:
+        # Reset to "pending" state WITHOUT destroying the underlying Tk widgets.
+        # Destroy/recreate over hundreds of refresh cycles leaks GDI/USER
+        # handles on Windows (the "未响应" symptom).
+        self.detail_data = None
+        self.verify_url = ""
+        self.request_url = ""
+        self.icon_label.configure(text="…", text_color=PALETTE["accent"])
+        self.summary_label.configure(text="待检测…", text_color=PALETTE["muted"])
+        self.detail_btn.configure(state="disabled")
+        self.verify_btn.configure(state="disabled")
+
 
 class DetailWindow(ctk.CTkToplevel):
     def __init__(self, parent, title: str, res: dict):
@@ -422,6 +436,16 @@ class ResultGroup(ctk.CTkFrame):
         for child in list(self.body.winfo_children()):
             child.destroy()
         self._cards.clear()
+
+    def reset_all(self):
+        """Reset every card to its pending state but KEEP the widgets alive.
+        Used between auto-refresh cycles to avoid Windows GDI handle leaks
+        from destroy/recreate churn."""
+        for card in self._cards.values():
+            try:
+                card.reset()
+            except Exception:
+                pass
 
 
 # ============================================================================
@@ -663,13 +687,17 @@ class FloatingWidget(ctk.CTkToplevel):
 
     def _start_topmost_loop(self):
         """Periodically re-assert topmost + raise to stay above fullscreen
-        apps and other always-on-top windows on macOS."""
+        apps and other always-on-top windows on macOS.
+
+        Interval bumped to 5s: every 1.5s adds up to 28k+ calls per 12h, and
+        on Windows each topmost flip triggers z-order recomputation which
+        contributes to the long-run UI hang."""
         try:
             self.attributes("-topmost", True)
             self.lift()
         except Exception:
             return
-        self._lift_after_id = self.after(1500, self._start_topmost_loop)
+        self._lift_after_id = self.after(5000, self._start_topmost_loop)
 
     # ─ data ────────────────────────────────────────────────────────────
     def set_score(self, score: int | None, prev: int | None = None):
@@ -1336,11 +1364,21 @@ class App(ctk.CTk):
         self.current_ip = ""
         self.widget: FloatingWidget | None = None
         self.last_score: int | None = None
+        self._closing = False
+        self._drain_after_id: str | None = None
+        self._health_after_id: str | None = None
+        self._health_baseline: dict = {}
+        # Cached pieces of the network-change signature so we don't spawn a
+        # subprocess every poll tick. Recomputed only when the cheap UDP
+        # socket check sees a local-IP change or the cache ages out.
+        self._net_last_local_ip: str = ""
+        self._net_cached_gw: tuple = ()
+        self._net_last_gw_check: float = 0.0
 
         self._set_splash_status("正在构建界面…")
         self._build_ui()
         self._set_splash_status("即将就绪…")
-        self.after(100, self._drain_queue)
+        self._drain_after_id = self.after(100, self._drain_queue)
 
         # Persist geometry + mode on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1356,6 +1394,12 @@ class App(ctk.CTk):
         self._net_signature = self._capture_net_signature()
         self._net_after_id: str | None = None
         self._start_network_monitor()
+
+        # ── resource-health probe ──
+        # Periodically writes [HEALTH] lines so we can spot leaks (GDI/USER on
+        # Windows, thread/Tk-widget creep elsewhere) in the log after a long
+        # session, without needing the user to watch Task Manager.
+        self._start_health_monitor()
 
         # Auto-run a detection on launch (configurable)
         if cfg.get("settings", {}).get("auto_check_on_launch", True):
@@ -1452,6 +1496,8 @@ class App(ctk.CTk):
             pass
 
     def _on_close(self):
+        # Tell every recurring after() callback to stop re-arming.
+        self._closing = True
         try:
             cfg = load_config()
             cfg.setdefault("ui", {})
@@ -1465,6 +1511,16 @@ class App(ctk.CTk):
             save_config(cfg)
         except Exception:
             pass
+        # Cancel pending callbacks so they don't fire on a half-destroyed root.
+        for attr in ("_drain_after_id", "_refresh_after_id",
+                     "_net_after_id", "_health_after_id"):
+            aid = getattr(self, attr, None)
+            if aid:
+                try:
+                    self.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         self.destroy()
 
     # ── ui ─────────────────────────────────────────────────────────────
@@ -1904,6 +1960,8 @@ class App(ctk.CTk):
 
     def _auto_refresh_tick(self):
         self._refresh_after_id = None
+        if self._closing:
+            return
         if self.running:
             # the running check will reschedule via _finish
             return
@@ -1911,11 +1969,13 @@ class App(ctk.CTk):
         self.start_check()
 
     # ── network-change monitor ────────────────────────────────────────
-    def _capture_net_signature(self) -> tuple:
-        """Snapshot of network state. Used to detect IP / gateway changes."""
-        sig: list[str] = []
+    def _query_default_gateway(self) -> tuple:
+        """Spawn the platform-specific `route` / `ip route` subprocess to look
+        up the default gateway + interface. This is the EXPENSIVE part of the
+        signature — we cache its result and only refresh when the cheap local
+        IP probe sees a change or the cache ages out (see _capture_net_signature)."""
+        gw: list[str] = []
         sysname = platform.system()
-        # Default gateway
         try:
             if sysname == "Darwin":
                 r = subprocess.run(
@@ -1924,9 +1984,9 @@ class App(ctk.CTk):
                 for line in (r.stdout or "").splitlines():
                     line = line.strip()
                     if line.startswith("gateway:"):
-                        sig.append("gw=" + line.split(":", 1)[1].strip())
+                        gw.append("gw=" + line.split(":", 1)[1].strip())
                     elif line.startswith("interface:"):
-                        sig.append("if=" + line.split(":", 1)[1].strip())
+                        gw.append("if=" + line.split(":", 1)[1].strip())
             elif sysname == "Windows":
                 r = subprocess.run(
                     ["route", "print", "0.0.0.0"],
@@ -1935,7 +1995,7 @@ class App(ctk.CTk):
                 for line in (r.stdout or "").splitlines():
                     parts = line.split()
                     if len(parts) >= 4 and parts[0] == "0.0.0.0":
-                        sig.append("gw=" + parts[2])
+                        gw.append("gw=" + parts[2])
                         break
             else:  # Linux
                 r = subprocess.run(
@@ -1947,23 +2007,49 @@ class App(ctk.CTk):
                         if "via" in parts:
                             i = parts.index("via")
                             if i + 1 < len(parts):
-                                sig.append("gw=" + parts[i + 1])
+                                gw.append("gw=" + parts[i + 1])
                         if "dev" in parts:
                             i = parts.index("dev")
                             if i + 1 < len(parts):
-                                sig.append("if=" + parts[i + 1])
+                                gw.append("if=" + parts[i + 1])
                         break
         except Exception:
             pass
-        # Local egress IP (the one used to reach the internet)
+        return tuple(gw)
+
+    def _capture_net_signature(self) -> tuple:
+        """Snapshot of network state. Used to detect IP / gateway changes.
+
+        Optimised: every tick does the cheap UDP-socket probe; the expensive
+        subprocess gateway query only re-runs when the local IP changes or
+        the gateway cache is older than 60s. Cuts ~95% of subprocess spawns
+        and avoids the GDI/handle drip that previously hung Windows after
+        many hours of running.
+        """
+        local_ip = ""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.settimeout(1.0)
             s.connect(("1.1.1.1", 53))
-            sig.append("lan=" + s.getsockname()[0])
+            local_ip = s.getsockname()[0]
             s.close()
         except Exception:
             pass
+
+        now = time.time()
+        need_gw_refresh = (
+            not self._net_cached_gw
+            or local_ip != self._net_last_local_ip
+            or now - self._net_last_gw_check > 60
+        )
+        if need_gw_refresh:
+            self._net_cached_gw = self._query_default_gateway()
+            self._net_last_gw_check = now
+        self._net_last_local_ip = local_ip
+
+        sig: list[str] = list(self._net_cached_gw)
+        if local_ip:
+            sig.append("lan=" + local_ip)
         return tuple(sig)
 
     def _start_network_monitor(self):
@@ -1974,6 +2060,9 @@ class App(ctk.CTk):
         self._net_after_id = self.after(secs * 1000, self._network_tick)
 
     def _network_tick(self):
+        if self._closing:
+            self._net_after_id = None
+            return
         cfg = load_config().get("settings", {})
         if not cfg.get("network_change_detection", True):
             self._net_after_id = None
@@ -1991,6 +2080,51 @@ class App(ctk.CTk):
                 self.start_check()
         secs = max(2, int(cfg.get("network_poll_seconds", 5)))
         self._net_after_id = self.after(secs * 1000, self._network_tick)
+
+    # ── resource-health monitor ──────────────────────────────────────
+    def _start_health_monitor(self):
+        """Write a baseline [HEALTH] line ~3s after launch, then one every
+        10 minutes. Lets us see whether GDI/USER/thread/widget counts grow
+        over a long session (= the leak symptom)."""
+        # Baseline is taken once the UI tree has settled.
+        self._health_after_id = self.after(3000, self._health_baseline_tick)
+
+    def _health_baseline_tick(self):
+        if self._closing:
+            self._health_after_id = None
+            return
+        snap = health.snapshot(self)
+        self._health_baseline = dict(snap)
+        self._log(f"[HEALTH] 基线  {health.summary_line(snap)}")
+        # Then start the periodic loop.
+        self._health_after_id = self.after(
+            10 * 60 * 1000, self._health_periodic_tick)
+
+    def _health_periodic_tick(self):
+        if self._closing:
+            self._health_after_id = None
+            return
+        snap = health.snapshot(self)
+        base = self._health_baseline or {}
+        # Build a delta-vs-baseline summary so growth is obvious at a glance.
+        delta_parts: list[str] = []
+        for key, label in (("gdi", "GDI"), ("user", "USER"),
+                           ("handles", "句柄"), ("fds", "fd"),
+                           ("threads", "线程"), ("widgets", "Tk"),
+                           ("rss_mb", "RSS")):
+            now = snap.get(key)
+            base_v = base.get(key)
+            if now is None or base_v is None:
+                continue
+            d = now - base_v
+            if d:
+                sign = "+" if d > 0 else ""
+                delta_parts.append(f"{label}{sign}{d}")
+        delta_str = f"  Δ {' '.join(delta_parts)}" if delta_parts else ""
+        self._log(f"[HEALTH] {health.summary_line(snap)}{delta_str}")
+        # Re-arm.
+        self._health_after_id = self.after(
+            10 * 60 * 1000, self._health_periodic_tick)
 
     # ──────────────────────────────────────────────────────────────────
     def _push_to_widget(self, ev: str, **kw):
@@ -2024,7 +2158,7 @@ class App(ctk.CTk):
         for g in (self.group_claude_focus, self.group_ip, self.group_risk,
                   self.group_ai, self.group_streaming, self.group_sites,
                   self.group_latency, self.group_speed, self.group_dns):
-            g.clear()
+            g.reset_all()
         self.claude_hero.reset()
         # Reset dashboard fact strip + alerts to "checking" state
         for v in self._fact_rows.values():
@@ -2076,6 +2210,9 @@ class App(ctk.CTk):
 
     # ── queue drain ───────────────────────────────────────────────────
     def _drain_queue(self):
+        if self._closing:
+            self._drain_after_id = None
+            return
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
@@ -2095,7 +2232,7 @@ class App(ctk.CTk):
                     self._finish(payload)
         except queue.Empty:
             pass
-        self.after(100, self._drain_queue)
+        self._drain_after_id = self.after(100, self._drain_queue)
 
     def _handle_result(self, key: str, title: str, res: dict):
         # ── Claude hero panel + floating widget data sync ──

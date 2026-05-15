@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la \"/Users/teaxus/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_8420444204712_b2e1/msg/file/2026-05/20260514.log\")",
+      "Bash(cp \"/Users/teaxus/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_8420444204712_b2e1/msg/file/2026-05/20260514.log\" /tmp/win_crash.log)",
+      "Read(//tmp/**)",
+      "Bash(grep -n -iE \"error|exception|traceback|fatal|crash|abort|segfault|access violation|stack overflow\" /tmp/win_crash.log | head -80)",
+      "Bash(tail -200 /tmp/win_crash.log)"
+    ]
+  }
+}

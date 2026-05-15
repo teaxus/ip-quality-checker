@@ -25,7 +25,9 @@ DEFAULT_CONFIG = {
         "auto_refresh_seconds": 120,
         # Watch for IP/gateway/interface changes and re-check on change.
         "network_change_detection": True,
-        "network_poll_seconds": 5,
+        # Was 5 — bumped to 15 to reduce the long-run handle/subprocess churn
+        # on Windows that contributed to a "未响应" hang after many hours.
+        "network_poll_seconds": 15,
         # Flash widget red when score drops below this.
         "low_score_threshold": 40,
         # Significant drop = old - new >= this value (one-time alert burst).
